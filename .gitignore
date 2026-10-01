@@ -1,0 +1,14 @@
+# build output
+build/
+monitor
+
+# generated logs (keep the folder itself)
+logs/*
+!logs/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+
+# editor
+.vscode/
