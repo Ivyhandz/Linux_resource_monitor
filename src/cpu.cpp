@@ -1,27 +1,42 @@
 #include "cpu.hpp"
 #include <fstream>
 #include <string>
-bool Read_Cpu_Times(CpuTimes& cpu_times)
+bool read_cpu_times(CpuTimes& out)
 {
-    // 1. Try to open the file
+    out = CpuTimes{}; // initialize all counters to 0
+
     std::ifstream file("/proc/stat");
 
     if (!file.is_open()) {
-        return false; // Failed to open the file
+        return false;
     }
 
     std::string label;
-    file >> label;  // gives the label first word of the file
 
-    if(label!="cpu") {
-        return false; // The first word is not "cpu"
+    if (!(file >> label)) {
+        return false;
     }
 
-    // 5. Read the 8 numbers directly into the struct
-    file >> cpu_times.user >> cpu_times.nice >> cpu_times.system >> cpu_times.idle 
-         >> cpu_times.iowait >> cpu_times.irq >> cpu_times.softirq >> cpu_times.steal;
+    if (label != "cpu") {
+        return false;
+    }
 
-         return true; // Successfully read the CPU times
+    // These four are required
+    if (!(file >> out.user
+              >> out.nice
+              >> out.system
+              >> out.idle))
+    {
+        return false;
+    }
+
+    // These are optional trailing fields
+    file >> out.iowait;
+    file >> out.irq;
+    file >> out.softirq;
+    file >> out.steal;
+
+    return true;
 }
 
 
@@ -30,18 +45,69 @@ unsigned long long total_jiffies(const CpuTimes& t) {
          + t.iowait + t.irq + t.softirq + t.steal;
 }
 
-CpuTimes Compute_Usage(const CpuTimes& prev, const CpuTimes& curr)
+CpuUsage compute_usage(const CpuTimes& prev, const CpuTimes& cur)
 {
-    CpuTimes usage;
+    CpuUsage usage;
 
-    usage.user = curr.user - prev.user;
-    usage.nice = curr.nice - prev.nice;
-    usage.system = curr.system - prev.system;
-    usage.idle = curr.idle - prev.idle;
-    usage.iowait = curr.iowait - prev.iowait;
-    usage.irq = curr.irq - prev.irq;
-    usage.softirq = curr.softirq - prev.softirq;
-    usage.steal = curr.steal - prev.steal;
-    
+    if (cur.user < prev.user ||
+        cur.nice < prev.nice ||
+        cur.system < prev.system ||
+        cur.idle < prev.idle ||
+        cur.iowait < prev.iowait ||
+        cur.irq < prev.irq ||
+        cur.softirq < prev.softirq ||
+        cur.steal < prev.steal)
+    {
+        return usage;
+    }
+
+    unsigned long long delta_total =
+        total_jiffies(cur) - total_jiffies(prev);
+
+    if (delta_total == 0)
+        return usage;
+
+    unsigned long long delta_user =
+        (cur.user - prev.user) +
+        (cur.nice - prev.nice);
+
+    unsigned long long delta_system =
+        (cur.system - prev.system) +
+        (cur.irq - prev.irq) +
+        (cur.softirq - prev.softirq);
+
+    unsigned long long delta_idle =
+        (cur.idle - prev.idle) +
+        (cur.iowait - prev.iowait);
+
+    usage.total =
+        (double)(delta_total - delta_idle) /
+        delta_total * 100.0;
+
+    usage.user =
+        (double)delta_user /
+        delta_total * 100.0;
+
+    usage.system =
+        (double)delta_system /
+        delta_total * 100.0;
+
+    usage.idle =
+        (double)delta_idle /
+        delta_total * 100.0;
+
     return usage;
+}
+
+bool read_loadavg(double& l1, double& l5, double& l15)
+{
+    std::ifstream file("/proc/loadavg");
+
+    if (!file.is_open())
+        return false;
+
+    if (!(file >> l1 >> l5 >> l15))
+        return false;
+
+    return true;
 }
