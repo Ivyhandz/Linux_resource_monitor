@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <dirent.h>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 
 namespace {
@@ -67,15 +68,43 @@ bool read_stat(int pid, ProcInfo& out) {
     return true;
 }
 
+// Reads /proc/<pid>/status and fills rss_kb from the VmRSS line (the value is in kB).
+// Kernel threads have no such line, so rss_kb stays 0.
+void read_status(int pid, ProcInfo& out) {
+    std::ifstream file("/proc/" + std::to_string(pid) + "/status");
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.compare(0, 6, "VmRSS:") == 0) {
+            out.rss_kb = std::strtoull(line.c_str() + 6, nullptr, 10);
+            return;
+        }
+    }
+}
+
+// Reads /proc/<pid>/cmdline: arguments are separated by NUL bytes, so turn them into spaces.
+// Kernel threads have an empty cmdline; show them as [name] instead.
+void read_cmdline(int pid, ProcInfo& out) {
+    std::ifstream file("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    for (char& c : text) {
+        if (c == '\0') c = ' ';
+    }
+    while (!text.empty() && text.back() == ' ') text.pop_back();
+    out.cmdline = text.empty() ? "[" + out.name + "]" : text;
+}
+
 }  // namespace
 
-// Fills in PID, name, state and cumulative CPU jiffies. CPU% and memory come in later steps.
+// Fills in PID, name, state, CPU jiffies, resident memory and command line.
+// CPU% and MEM% come in a later step.
 std::vector<ProcInfo> ProcessSampler::sample(unsigned long long, unsigned long long) {
     std::vector<ProcInfo> result;
     for (int pid : list_pids()) {
         ProcInfo p;
         p.pid = pid;
         if (!read_stat(pid, p)) continue;          // process vanished or unreadable: skip it
+        read_status(pid, p);
+        read_cmdline(pid, p);
         result.push_back(p);
     }
     return result;
