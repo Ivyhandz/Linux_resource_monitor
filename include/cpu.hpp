@@ -1,16 +1,13 @@
 #pragma once
 
-struct CpuTimes {
-    unsigned long long user = 0;    // Time spent running user-space processes
-    unsigned long long nice = 0;    // Time spent running low-priority (nice) processes
-    unsigned long long system = 0;  // Time spent in kernel space
-    unsigned long long idle = 0;    // Time the CPU spent doing nothing
-    unsigned long long iowait = 0;  // Time waiting for I/O to complete
-    unsigned long long irq = 0;     // Time spent servicing hardware interrupts
-    unsigned long long softirq = 0; // Time spent servicing software interrupts
-    unsigned long long steal = 0;   // Time "stolen" by a hypervisor (VMs)
+struct CpuTimes {                       // cumulative jiffies since boot, from the first line of /proc/stat
+    unsigned long long user = 0, nice = 0, system = 0, idle = 0,
+                       iowait = 0, irq = 0, softirq = 0, steal = 0;
 };
 
-bool Read_Cpu_Times(CpuTimes& cpu_times);
-unsigned long long total_jiffies(const CpuTimes& t);
-CpuTimes Compute_Usage(const CpuTimes& prev, const CpuTimes& curr);
+struct CpuUsage { double total = 0, user = 0, system = 0, idle = 0; };   // percentages over an interval
+
+bool read_cpu_times(CpuTimes& out);                                // one snapshot; never sleeps
+unsigned long long total_jiffies(const CpuTimes& t);               // sum of all eight fields
+CpuUsage compute_usage(const CpuTimes& prev, const CpuTimes& cur); // delta-based percentages
+bool read_loadavg(double& l1, double& l5, double& l15);
