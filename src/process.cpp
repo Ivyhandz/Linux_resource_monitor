@@ -1,11 +1,14 @@
 #include "process.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <dirent.h>
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -31,6 +34,12 @@ std::vector<int> list_pids() {
     }
     closedir(dir);
     return pids;
+}
+
+// Number of online CPU cores (at least 1). Used to scale process CPU% the way top does.
+long core_count() {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? n : 1;
 }
 
 // Reads /proc/<pid>/stat and fills name, state and cpu_jiffies (utime + stime).
@@ -95,18 +104,44 @@ void read_cmdline(int pid, ProcInfo& out) {
 
 }  // namespace
 
-// Fills in PID, name, state, CPU jiffies, resident memory and command line.
-// CPU% and MEM% come in a later step.
-std::vector<ProcInfo> ProcessSampler::sample(unsigned long long, unsigned long long) {
+// Scans /proc and returns every process, sorted by CPU% (highest first).
+// delta_total_jiffies: growth of total CPU time (all cores) since the previous call.
+// The first call, and any process seen for the first time, get cpu_pct = 0.
+std::vector<ProcInfo> ProcessSampler::sample(unsigned long long delta_total_jiffies,
+                                             unsigned long long mem_total_kb) {
+    const double ncores = static_cast<double>(core_count());
     std::vector<ProcInfo> result;
+    std::unordered_map<int, unsigned long long> current;   // becomes prev_jiffies_ afterwards
+
     for (int pid : list_pids()) {
         ProcInfo p;
         p.pid = pid;
         if (!read_stat(pid, p)) continue;          // process vanished or unreadable: skip it
         read_status(pid, p);
         read_cmdline(pid, p);
+
+        // CPU%: growth of this process's jiffies relative to growth of total jiffies.
+        auto it = prev_jiffies_.find(pid);
+        if (it != prev_jiffies_.end() && delta_total_jiffies > 0 && p.cpu_jiffies >= it->second) {
+            double delta_proc = static_cast<double>(p.cpu_jiffies - it->second);
+            p.cpu_pct = delta_proc / static_cast<double>(delta_total_jiffies) * 100.0 * ncores;
+        }
+
+        // MEM%: resident memory as a share of total RAM.
+        if (mem_total_kb > 0) {
+            p.mem_pct = static_cast<double>(p.rss_kb) * 100.0 / static_cast<double>(mem_total_kb);
+        }
+
+        current[pid] = p.cpu_jiffies;
         result.push_back(p);
     }
+
+    prev_jiffies_ = std::move(current);            // forget processes that no longer exist
+
+    std::sort(result.begin(), result.end(), [](const ProcInfo& a, const ProcInfo& b) {
+        if (a.cpu_pct != b.cpu_pct) return a.cpu_pct > b.cpu_pct;
+        return a.mem_pct > b.mem_pct;
+    });
     return result;
 }
 
