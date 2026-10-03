@@ -1,36 +1,73 @@
+#include <climits>
+#include <csignal>
 #include <cstdio>
-#include <unistd.h>
+#include <cstdlib>
+#include <cstring>
 
-#include "cpu.hpp"
-#include "memory.hpp"
 #include "process.hpp"
 
-int main() {
-    MemInfo mem;
-    CpuTimes prev, cur;
-    if (!read_meminfo(mem) || !read_cpu_times(prev)) {
-        std::fprintf(stderr, "cannot read /proc\n");
-        return 1;
+namespace {
+
+void print_usage(std::FILE* out) {
+    std::fprintf(out,
+        "Usage:\n"
+        "  monitor                                   interactive view\n"
+        "  monitor --snapshot                        print one sample and exit\n"
+        "  monitor --log <dir> [--interval <sec>]    write CSV logs until stopped\n"
+        "  monitor --kill <pid> <TERM|KILL>          send a signal to a process\n"
+        "  monitor --help                            show this text\n");
+}
+
+// A PID argument must be digits only and fit in an int.
+bool parse_pid(const char* text, int& pid) {
+    if (*text == '\0') return false;
+    for (const char* c = text; *c != '\0'; ++c) {
+        if (*c < '0' || *c > '9') return false;
+    }
+    long value = std::strtol(text, nullptr, 10);
+    if (value > INT_MAX) return false;
+    pid = static_cast<int>(value);
+    return true;
+}
+
+// --kill <pid> <TERM|KILL>
+// Exit codes: 0 = signal sent, 1 = signal failed, 2 = bad usage. Messages go to stderr.
+int run_kill(int argc, char** argv) {
+    int pid = 0;
+    if (argc != 4 || !parse_pid(argv[2], pid)) {
+        print_usage(stderr);
+        return 2;
     }
 
-    ProcessSampler sampler;
-    sampler.sample(0, mem.total_kb);              // first call: only records the baseline
-
-    sleep(1);                                     // let some CPU time pass
-
-    if (!read_cpu_times(cur)) {
-        std::fprintf(stderr, "cannot read /proc/stat\n");
-        return 1;
+    int sig = 0;
+    if (std::strcmp(argv[3], "TERM") == 0) sig = SIGTERM;
+    else if (std::strcmp(argv[3], "KILL") == 0) sig = SIGKILL;
+    else {
+        print_usage(stderr);
+        return 2;
     }
-    unsigned long long delta = total_jiffies(cur) - total_jiffies(prev);
-    std::vector<ProcInfo> procs = sampler.sample(delta, mem.total_kb);
 
-    std::printf("delta_total_jiffies=%llu  total_ram_kb=%llu  processes=%zu\n",
-                delta, mem.total_kb, procs.size());
-    std::printf("%6s %7s %6s %-2s %s\n", "PID", "CPU%", "MEM%", "S", "COMMAND");
-    for (size_t i = 0; i < procs.size() && i < 8; ++i) {
-        const ProcInfo& p = procs[i];
-        std::printf("%6d %7.1f %6.1f %-2c %.60s\n", p.pid, p.cpu_pct, p.mem_pct, p.state, p.cmdline.c_str());
-    }
-    return 0;
+    SignalResult result = send_signal(pid, sig);
+    std::fprintf(stderr, "monitor: %s (PID %d)\n", result.message.c_str(), pid);
+    return result.ok ? 0 : 1;
+}
+
+int not_implemented(const char* what) {
+    std::fprintf(stderr, "monitor: %s is not implemented yet\n", what);
+    return 1;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc == 1) return not_implemented("interactive mode");
+
+    const char* option = argv[1];
+    if (std::strcmp(option, "--help") == 0) { print_usage(stdout); return 0; }
+    if (std::strcmp(option, "--kill") == 0) return run_kill(argc, argv);
+    if (std::strcmp(option, "--snapshot") == 0) return not_implemented("--snapshot");
+    if (std::strcmp(option, "--log") == 0) return not_implemented("--log");
+
+    print_usage(stderr);
+    return 2;
 }
