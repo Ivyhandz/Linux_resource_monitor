@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -73,6 +74,38 @@ void wait_interval(int seconds) {
     }
 }
 
+// ---------- CSV helpers ----------
+
+// Local time as YYYY-MM-DDTHH:MM:SS.
+std::string timestamp_now() {
+    std::time_t now = std::time(nullptr);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm_now);
+    return buf;
+}
+
+// Opens a CSV file for appending. The header row is written only if the file is new or empty.
+std::FILE* open_csv(const std::string& path, const char* header) {
+    struct stat st;
+    bool is_new = stat(path.c_str(), &st) != 0 || st.st_size == 0;
+    std::FILE* file = std::fopen(path.c_str(), "a");
+    if (file != nullptr && is_new) {
+        std::fputs(header, file);
+        std::fflush(file);
+    }
+    return file;
+}
+
+// A comma inside a process name would break the CSV columns, so it becomes '_'.
+std::string csv_safe(std::string name) {
+    for (char& c : name) {
+        if (c == ',') c = '_';
+    }
+    return name;
+}
+
 // ---------- --kill ----------
 
 // --kill <pid> <TERM|KILL>
@@ -97,10 +130,10 @@ int run_kill(int argc, char** argv) {
     return result.ok ? 0 : 1;
 }
 
-// ---------- --log (skeleton: the loop and the clean shutdown; CSV comes next) ----------
+// ---------- --log ----------
 
 // --log <dir> [--interval <sec>]
-// Exit codes: 0 = clean stop, 1 = directory missing or not writable, 2 = bad usage.
+// Exit codes: 0 = clean stop, 1 = directory or files not usable, 2 = bad usage.
 int run_log(int argc, char** argv) {
     if (argc != 3 && argc != 5) {
         print_usage(stderr);
@@ -115,9 +148,22 @@ int run_log(int argc, char** argv) {
         }
     }
 
+    // The directory must already exist; monitor.sh creates it, not this program.
     struct stat st;
     if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || access(dir, W_OK) != 0) {
         std::fprintf(stderr, "monitor: cannot write to directory %s\n", dir);
+        return 1;
+    }
+
+    const std::string base = dir;
+    std::FILE* sys_csv = open_csv(base + "/system.csv",
+                                  "timestamp,cpu_pct,mem_pct,swap_pct,disk_pct,load1\n");
+    std::FILE* proc_csv = open_csv(base + "/processes.csv",
+                                   "timestamp,pid,name,cpu_pct,mem_pct\n");
+    if (sys_csv == nullptr || proc_csv == nullptr) {
+        std::fprintf(stderr, "monitor: cannot open the CSV files in %s\n", dir);
+        if (sys_csv != nullptr) std::fclose(sys_csv);
+        if (proc_csv != nullptr) std::fclose(proc_csv);
         return 1;
     }
 
@@ -128,6 +174,8 @@ int run_log(int argc, char** argv) {
     CpuTimes prev, cur;
     if (!read_meminfo(mem) || !read_cpu_times(prev)) {
         std::fprintf(stderr, "monitor: cannot read /proc\n");
+        std::fclose(sys_csv);
+        std::fclose(proc_csv);
         return 1;
     }
     ProcessSampler sampler;
@@ -143,12 +191,34 @@ int run_log(int argc, char** argv) {
         unsigned long long total_before = total_jiffies(prev);
         unsigned long long delta = total_now >= total_before ? total_now - total_before : 0;
 
+        CpuUsage usage = compute_usage(prev, cur);
+        double load1 = 0, load5 = 0, load15 = 0;
+        read_loadavg(load1, load5, load15);
         std::vector<ProcInfo> procs = sampler.sample(delta, mem.total_kb);
         prev = cur;
+
+        const std::string ts = timestamp_now();
+
+        // TODO: replace this placeholder with disk_used_pct(...) once disk.cpp is written.
+        const double disk_pct = 0.0;
+
+        std::fprintf(sys_csv, "%s,%.1f,%.1f,%.1f,%.1f,%.1f\n", ts.c_str(), usage.total,
+                     mem_used_pct(mem), swap_used_pct(mem), disk_pct, load1);
+        std::fflush(sys_csv);
+
+        // procs is already sorted by CPU%, so the first five are the top five.
+        for (size_t i = 0; i < procs.size() && i < 5; ++i) {
+            const ProcInfo& p = procs[i];
+            std::fprintf(proc_csv, "%s,%d,%s,%.1f,%.1f\n", ts.c_str(), p.pid,
+                         csv_safe(p.name).c_str(), p.cpu_pct, p.mem_pct);
+        }
+        std::fflush(proc_csv);
+
         ++samples;
-        std::fprintf(stderr, "monitor: sample %llu (%zu processes)\n", samples, procs.size());
     }
 
+    std::fclose(sys_csv);
+    std::fclose(proc_csv);
     std::fprintf(stderr, "monitor: stopped after %llu samples\n", samples);
     return 0;
 }
