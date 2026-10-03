@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <dirent.h>
 #include <fstream>
 #include <iterator>
+#include <signal.h>
 #include <sstream>
 #include <unistd.h>
 #include <utility>
@@ -40,6 +43,12 @@ std::vector<int> list_pids() {
 long core_count() {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? n : 1;
+}
+
+// Lower-case copy of a string (used for case-insensitive search).
+std::string to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
 }
 
 // Reads /proc/<pid>/stat and fills name, state and cpu_jiffies (utime + stime).
@@ -145,10 +154,41 @@ std::vector<ProcInfo> ProcessSampler::sample(unsigned long long delta_total_jiff
     return result;
 }
 
-SignalResult send_signal(int, int) {
-    return {false, "not implemented"};
+// Sends SIGTERM or SIGKILL to a process. Never prints; the caller shows the message.
+SignalResult send_signal(int pid, int sig) {
+    if (sig != SIGTERM && sig != SIGKILL) return {false, "unsupported signal"};
+
+    // kill(0, ...) signals a whole process group and kill(-1, ...) signals every process
+    // we may signal, so PIDs <= 1 are always refused (PID 1 is init).
+    if (pid <= 1) return {false, "refusing to signal PID <= 1"};
+    if (pid == static_cast<int>(getpid())) return {false, "refusing to signal own process"};
+
+    if (kill(pid, sig) == 0) return {true, "signal sent"};
+
+    switch (errno) {
+        case ESRCH: return {false, "no such process"};
+        case EPERM: return {false, "permission denied"};
+        default:    return {false, std::string("kill failed: ") + std::strerror(errno)};
+    }
 }
 
-std::vector<ProcInfo> find_processes(const std::vector<ProcInfo>&, const std::string&) {
-    return {};
+// A query of only digits is an exact PID match; anything else is a case-insensitive
+// substring match on the process name. An empty query matches nothing.
+std::vector<ProcInfo> find_processes(const std::vector<ProcInfo>& all, const std::string& query) {
+    std::vector<ProcInfo> matches;
+    if (query.empty()) return matches;
+
+    if (all_digits(query.c_str())) {
+        long wanted = std::strtol(query.c_str(), nullptr, 10);
+        for (const ProcInfo& p : all) {
+            if (static_cast<long>(p.pid) == wanted) matches.push_back(p);
+        }
+        return matches;
+    }
+
+    const std::string needle = to_lower(query);
+    for (const ProcInfo& p : all) {
+        if (to_lower(p.name).find(needle) != std::string::npos) matches.push_back(p);
+    }
+    return matches;
 }
