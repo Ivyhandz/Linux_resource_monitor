@@ -4,8 +4,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <poll.h>
 #include <string>
 #include <sys/stat.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include "cpu.hpp"
@@ -104,6 +106,76 @@ std::string csv_safe(std::string name) {
         if (c == ',') c = '_';
     }
     return name;
+}
+
+// ---------- terminal control (interactive mode) ----------
+
+// Puts the terminal into single-key mode and restores it on EVERY exit path, because the
+// destructor runs however the function ends (return, break, early return).
+class TerminalGuard {
+public:
+    TerminalGuard() {
+        if (tcgetattr(STDIN_FILENO, &saved_) != 0) return;
+        struct termios raw = saved_;
+        // No line buffering and no echo. ISIG stays on, so Ctrl+C still sends SIGINT.
+        raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+        raw.c_cc[VMIN] = 1;
+        raw.c_cc[VTIME] = 0;
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) return;
+        active_ = true;
+        std::fputs("\033[?1049h\033[?25l", stdout);   // alternate screen, hide the cursor
+        std::fflush(stdout);
+    }
+
+    ~TerminalGuard() {
+        if (!active_) return;
+        std::fputs("\033[?25h\033[?1049l", stdout);   // show the cursor, leave the alternate screen
+        std::fflush(stdout);
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
+    }
+
+    TerminalGuard(const TerminalGuard&) = delete;
+    TerminalGuard& operator=(const TerminalGuard&) = delete;
+
+    bool active() const { return active_; }
+
+private:
+    struct termios saved_ = {};
+    bool active_ = false;
+};
+
+// Waits up to timeout_ms for one keypress. Returns 0 on timeout or when a signal interrupts
+// the wait, and 'q' if the input is closed.
+char read_key(int timeout_ms) {
+    struct pollfd pfd;
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int ready = poll(&pfd, 1, timeout_ms);
+    if (ready <= 0) return 0;
+    char c = 0;
+    ssize_t n = read(STDIN_FILENO, &c, 1);
+    if (n == 0) return 'q';
+    if (n < 0) return 0;
+    return c;
+}
+
+// TEMPORARY: a plain frame so the terminal handling can be tested before ui.cpp exists.
+// It is replaced by draw_screen() from ui.hpp once Teammate 3 has written it.
+void draw_temp_frame(const std::vector<ProcInfo>& procs, double cpu, double mem,
+                     const std::string& status) {
+    std::printf("\033[H");                                   // cursor to the top left
+    std::printf("Linux System Monitor (temporary view)\033[K\n");
+    std::printf("CPU %.1f%%   Memory %.1f%%\033[K\n\033[K\n", cpu, mem);
+    std::printf("%6s %7s %6s %-2s %s\033[K\n", "PID", "CPU%", "MEM%", "S", "COMMAND");
+    for (size_t i = 0; i < procs.size() && i < 15; ++i) {
+        const ProcInfo& p = procs[i];
+        std::printf("%6d %7.1f %6.1f %-2c %.50s\033[K\n", p.pid, p.cpu_pct, p.mem_pct,
+                    p.state, p.cmdline.c_str());
+    }
+    std::printf("\033[K\n[r] Refresh  [s] Search  [k] Kill  [q] Quit\033[K\n%s\033[K\n\033[J",
+                status.c_str());
+    std::fflush(stdout);
 }
 
 // ---------- --kill ----------
@@ -223,6 +295,54 @@ int run_log(int argc, char** argv) {
     return 0;
 }
 
+// ---------- interactive mode ----------
+
+// Exit codes: 0 = normal quit, 1 = not a terminal or /proc could not be read.
+int run_tui() {
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        std::fprintf(stderr, "monitor: interactive mode needs a terminal\n");
+        return 1;
+    }
+    install_signal_handlers();
+
+    MemInfo mem;
+    CpuTimes prev, cur;
+    if (!read_meminfo(mem) || !read_cpu_times(prev)) {
+        std::fprintf(stderr, "monitor: cannot read /proc\n");
+        return 1;
+    }
+    ProcessSampler sampler;
+    sampler.sample(0, mem.total_kb);       // baseline: CPU% needs two readings
+    struct timespec first = {0, 500 * 1000 * 1000};
+    nanosleep(&first, nullptr);
+
+    TerminalGuard terminal;                // restores the terminal however this function ends
+    if (!terminal.active()) {
+        std::fprintf(stderr, "monitor: cannot set up the terminal\n");
+        return 1;
+    }
+
+    std::string status = "ready";
+    while (!g_stop) {
+        if (read_meminfo(mem) && read_cpu_times(cur)) {
+            unsigned long long total_now = total_jiffies(cur);
+            unsigned long long total_before = total_jiffies(prev);
+            unsigned long long delta = total_now >= total_before ? total_now - total_before : 0;
+            CpuUsage usage = compute_usage(prev, cur);
+            std::vector<ProcInfo> procs = sampler.sample(delta, mem.total_kb);
+            prev = cur;
+            draw_temp_frame(procs, usage.total, mem_used_pct(mem), status);
+        }
+
+        char key = read_key(2000);         // wait up to 2 s for a key, then refresh anyway
+        if (key == 'q' || key == 'Q') break;
+        if (key == 's' || key == 'k') status = "search and kill come in the next step";
+        else if (key == 'r') status = "refreshed";
+        else status = "";
+    }
+    return 0;
+}
+
 int not_implemented(const char* what) {
     std::fprintf(stderr, "monitor: %s is not implemented yet\n", what);
     return 1;
@@ -231,7 +351,7 @@ int not_implemented(const char* what) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc == 1) return not_implemented("interactive mode");
+    if (argc == 1) return run_tui();
 
     const char* option = argv[1];
     if (std::strcmp(option, "--help") == 0) { print_usage(stdout); return 0; }
