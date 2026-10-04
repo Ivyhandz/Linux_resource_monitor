@@ -1,3 +1,4 @@
+#include <cctype>
 #include <climits>
 #include <csignal>
 #include <cstdio>
@@ -48,6 +49,15 @@ bool parse_interval(const char* text, int& seconds) {
     if (*end != '\0' || value < 1 || value > 3600) return false;
     seconds = static_cast<int>(value);
     return true;
+}
+
+// Removes spaces and tabs from both ends of a string.
+std::string trim(const std::string& s) {
+    size_t begin = 0;
+    while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
+    size_t end = s.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+    return s.substr(begin, end - begin);
 }
 
 // ---------- signal handling ----------
@@ -116,12 +126,12 @@ class TerminalGuard {
 public:
     TerminalGuard() {
         if (tcgetattr(STDIN_FILENO, &saved_) != 0) return;
-        struct termios raw = saved_;
+        raw_ = saved_;
         // No line buffering and no echo. ISIG stays on, so Ctrl+C still sends SIGINT.
-        raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
-        raw.c_cc[VMIN] = 1;
-        raw.c_cc[VTIME] = 0;
-        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) return;
+        raw_.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+        raw_.c_cc[VMIN] = 1;
+        raw_.c_cc[VTIME] = 0;
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw_) != 0) return;
         active_ = true;
         std::fputs("\033[?1049h\033[?25l", stdout);   // alternate screen, hide the cursor
         std::fflush(stdout);
@@ -131,7 +141,7 @@ public:
         if (!active_) return;
         std::fputs("\033[?25h\033[?1049l", stdout);   // show the cursor, leave the alternate screen
         std::fflush(stdout);
-        tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_);    // always back to the ORIGINAL settings
     }
 
     TerminalGuard(const TerminalGuard&) = delete;
@@ -139,8 +149,25 @@ public:
 
     bool active() const { return active_; }
 
+    // Normal line mode with echo and a visible cursor, for typing the answer to a prompt.
+    void to_normal_mode() {
+        if (!active_) return;
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_);
+        std::fputs("\033[?25h", stdout);
+        std::fflush(stdout);
+    }
+
+    // Back to single-key mode. TCSAFLUSH discards any keys typed in the meantime.
+    void to_raw_mode() {
+        if (!active_) return;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_);
+        std::fputs("\033[?25l", stdout);
+        std::fflush(stdout);
+    }
+
 private:
     struct termios saved_ = {};
+    struct termios raw_ = {};
     bool active_ = false;
 };
 
@@ -160,7 +187,27 @@ char read_key(int timeout_ms) {
     return c;
 }
 
-// TEMPORARY: a plain frame so the terminal handling can be tested before ui.cpp exists.
+// Reads one line in normal mode (the terminal itself handles Backspace). A signal such as
+// Ctrl+C interrupts the read, and the main loop then stops because g_stop is set.
+std::string read_line() {
+    std::string line;
+    char c = 0;
+    while (read(STDIN_FILENO, &c, 1) == 1 && c != '\n') line.push_back(c);
+    return line;
+}
+
+// Shows a prompt on the bottom row, reads the answer in normal mode, and returns to
+// single-key mode. The answer comes back with surrounding spaces removed.
+std::string ask(TerminalGuard& terminal, const char* prompt) {
+    terminal.to_normal_mode();
+    std::printf("\033[999;1H\033[K%s", prompt);
+    std::fflush(stdout);
+    std::string answer = read_line();
+    terminal.to_raw_mode();
+    return trim(answer);
+}
+
+// TEMPORARY: a plain frame so the interactive mode can be tested before ui.cpp exists.
 // It is replaced by draw_screen() from ui.hpp once Teammate 3 has written it.
 void draw_temp_frame(const std::vector<ProcInfo>& procs, double cpu, double mem,
                      const std::string& status) {
@@ -297,6 +344,39 @@ int run_log(int argc, char** argv) {
 
 // ---------- interactive mode ----------
 
+// The k key: asks for a PID, a signal and a confirmation, then calls send_signal().
+// The result goes into `status`, which the next screen refresh shows.
+void handle_kill(TerminalGuard& terminal, const std::vector<ProcInfo>& procs,
+                 std::string& status) {
+    std::string pid_text = ask(terminal, "Kill which PID? (blank to cancel): ");
+    if (pid_text.empty()) { status = "kill cancelled"; return; }
+
+    int pid = 0;
+    if (!parse_pid(pid_text.c_str(), pid)) { status = "not a valid PID"; return; }
+
+    std::vector<ProcInfo> found = find_processes(procs, std::to_string(pid));
+    if (found.empty()) { status = "PID " + std::to_string(pid) + " is not in the process list"; return; }
+
+    std::string choice = ask(terminal, "Signal: t = TERM (default), k = KILL: ");
+    int sig = SIGTERM;
+    const char* sig_name = "TERM";
+    if (choice == "k" || choice == "K") {
+        sig = SIGKILL;
+        sig_name = "KILL";
+    } else if (!choice.empty() && choice != "t" && choice != "T") {
+        status = "unknown signal choice, kill cancelled";
+        return;
+    }
+
+    std::string question = std::string("Send ") + sig_name + " to " + std::to_string(pid) +
+                           " (" + found[0].name + ")? [y/N]: ";
+    std::string answer = ask(terminal, question.c_str());
+    if (answer != "y" && answer != "Y") { status = "kill cancelled"; return; }
+
+    SignalResult result = send_signal(pid, sig);
+    status = result.message + " (PID " + std::to_string(pid) + ")";
+}
+
 // Exit codes: 0 = normal quit, 1 = not a terminal or /proc could not be read.
 int run_tui() {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
@@ -322,23 +402,44 @@ int run_tui() {
         return 1;
     }
 
+    std::vector<ProcInfo> procs;           // the latest sample
+    std::string filter;                    // the active search; empty means show everything
     std::string status = "ready";
+    double cpu_total = 0.0, mem_pct = 0.0;
+
     while (!g_stop) {
         if (read_meminfo(mem) && read_cpu_times(cur)) {
             unsigned long long total_now = total_jiffies(cur);
             unsigned long long total_before = total_jiffies(prev);
             unsigned long long delta = total_now >= total_before ? total_now - total_before : 0;
-            CpuUsage usage = compute_usage(prev, cur);
-            std::vector<ProcInfo> procs = sampler.sample(delta, mem.total_kb);
+            cpu_total = compute_usage(prev, cur).total;
+            mem_pct = mem_used_pct(mem);
+            procs = sampler.sample(delta, mem.total_kb);
             prev = cur;
-            draw_temp_frame(procs, usage.total, mem_used_pct(mem), status);
         }
+
+        std::vector<ProcInfo> view = filter.empty() ? procs : find_processes(procs, filter);
+        std::string line = status;
+        if (!filter.empty()) {
+            line = "search '" + filter + "': " + std::to_string(view.size()) +
+                   " match(es), press r to clear";
+            if (!status.empty()) line += "  |  " + status;
+        }
+        draw_temp_frame(view, cpu_total, mem_pct, line);
 
         char key = read_key(2000);         // wait up to 2 s for a key, then refresh anyway
         if (key == 'q' || key == 'Q') break;
-        if (key == 's' || key == 'k') status = "search and kill come in the next step";
-        else if (key == 'r') status = "refreshed";
-        else status = "";
+        if (key == 'r' || key == 'R') {
+            filter.clear();
+            status = "refreshed";
+        } else if (key == 's' || key == 'S') {
+            filter = ask(terminal, "Search PID or name (blank clears): ");
+            status = filter.empty() ? "search cleared" : "";
+        } else if (key == 'k' || key == 'K') {
+            handle_kill(terminal, procs, status);
+        } else if (key != 0) {
+            status = "";                   // a timeout keeps the message; any other key clears it
+        }
     }
     return 0;
 }
