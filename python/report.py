@@ -386,7 +386,124 @@ def write_json_report(path, system_stats, process_stats):
             default=json_serializer,
         )
         file.write("\n")
-        
+
+def write_csv_report(path, system_stats, process_stats):
+    rows = []
+
+    def add_system(metric, value, timestamp=""):
+        rows.append([
+            "system",
+            metric,
+            value,
+            timestamp,
+            "",
+            "",
+            "",
+        ])
+
+    add_system("samples", system_stats["samples"])
+    add_system(
+        "first_timestamp",
+        system_stats["first_timestamp"],
+    )
+    add_system(
+        "last_timestamp",
+        system_stats["last_timestamp"],
+    )
+    add_system(
+        "duration_seconds",
+        system_stats["duration_seconds"],
+    )
+    add_system(
+        "average_cpu",
+        system_stats["average_cpu"],
+    )
+    add_system(
+        "peak_cpu",
+        system_stats["peak_cpu"],
+        system_stats["peak_cpu_timestamp"],
+    )
+    add_system(
+        "average_memory",
+        system_stats["average_memory"],
+    )
+    add_system(
+        "peak_memory",
+        system_stats["peak_memory"],
+        system_stats["peak_memory_timestamp"],
+    )
+    add_system(
+        "average_swap",
+        system_stats["average_swap"],
+    )
+    add_system(
+        "peak_swap",
+        system_stats["peak_swap"],
+    )
+    add_system(
+        "last_disk",
+        system_stats["last_disk"],
+    )
+    add_system(
+        "average_load",
+        system_stats["average_load"],
+    )
+    add_system(
+        "peak_load",
+        system_stats["peak_load"],
+        system_stats["peak_load_timestamp"],
+    )
+
+    highest_cpu = process_stats.get("highest_cpu")
+    if highest_cpu is not None:
+        rows.append([
+            "process",
+            "highest_cpu",
+            highest_cpu["cpu_pct"],
+            highest_cpu["timestamp_text"],
+            highest_cpu["pid"],
+            highest_cpu["name"],
+            "",
+        ])
+
+    highest_memory = process_stats.get("highest_memory")
+    if highest_memory is not None:
+        rows.append([
+            "process",
+            "highest_memory",
+            highest_memory["mem_pct"],
+            highest_memory["timestamp_text"],
+            highest_memory["pid"],
+            highest_memory["name"],
+            "",
+        ])
+
+    for index, process in enumerate(
+        process_stats.get("top_average_cpu", []),
+        start=1,
+    ):
+        rows.append([
+            "process",
+            "top_average_cpu_{}".format(index),
+            process["average_cpu"],
+            "",
+            "",
+            process["name"],
+            process["samples"],
+        ])
+
+    with open(path, "w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            "section",
+            "metric",
+            "value",
+            "timestamp",
+            "pid",
+            "name",
+            "samples",
+        ])
+        writer.writerows(rows)
 def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Generate a report from Linux system monitor CSV data."
@@ -469,8 +586,6 @@ def main():
     print_system_stats(system_stats)
     print_process_stats(process_stats)
 
-   
-
     if args.json_file:
         try:
             write_json_report(
@@ -481,6 +596,20 @@ def main():
         except OSError as exc:
             print(
                 "error: could not write JSON file: {}".format(exc),
+                file=sys.stderr,
+            )
+            return 1
+
+    if args.csv_file:
+        try:
+            write_csv_report(
+                args.csv_file,
+                system_stats,
+                process_stats,
+            )
+        except OSError as exc:
+            print(
+                "error: could not write CSV file: {}".format(exc),
                 file=sys.stderr,
             )
             return 1
