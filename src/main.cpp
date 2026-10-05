@@ -199,11 +199,13 @@ std::string read_line() {
 // Shows a prompt on the bottom row, reads the answer in normal mode, and returns to
 // single-key mode. The answer comes back with surrounding spaces removed.
 std::string ask(TerminalGuard& terminal, const char* prompt) {
+    if (g_stop) return "";               // a stop request cancels every prompt
     terminal.to_normal_mode();
     std::printf("\033[999;1H\033[K%s", prompt);
     std::fflush(stdout);
     std::string answer = read_line();
     terminal.to_raw_mode();
+    if (g_stop) return "";               // stopped while typing: discard the answer
     return trim(answer);
 }
 
