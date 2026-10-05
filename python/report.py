@@ -34,14 +34,6 @@ def parse_timestamp(value):
 
 
 def load_system_csv(path):
-    """
-    Read system.csv.
-
-    Returns:
-        (valid_rows, skipped_count)
-
-    Invalid rows are skipped rather than terminating the report.
-    """
     rows = []
     skipped = 0
 
@@ -109,12 +101,6 @@ def load_system_csv(path):
 
 
 def load_process_csv(path):
-    """
-    Read processes.csv.
-
-    Returns:
-        (valid_rows, skipped_count)
-    """
     rows = []
     skipped = 0
 
@@ -188,8 +174,6 @@ def load_process_csv(path):
 
 
 def calculate_system_stats(rows):
-    """Calculate system-level statistics from valid rows."""
-
     cpu_values = [row["cpu_pct"] for row in rows]
     mem_values = [row["mem_pct"] for row in rows]
     swap_values = [row["swap_pct"] for row in rows]
@@ -207,7 +191,6 @@ def calculate_system_stats(rows):
 
     return {
         "samples": len(rows),
-
         "first_timestamp": first_row["timestamp_text"],
         "last_timestamp": last_row["timestamp_text"],
         "duration_seconds": duration.total_seconds(),
@@ -231,9 +214,53 @@ def calculate_system_stats(rows):
     }
 
 
-def print_system_stats(stats):
-    """Print the Stage 2 system statistics."""
+def calculate_process_stats(rows):
+    """Calculate process-level statistics."""
 
+    if not rows:
+        return {
+            "highest_cpu": None,
+            "highest_memory": None,
+            "top_average_cpu": [],
+        }
+
+    highest_cpu = max(rows, key=lambda row: row["cpu_pct"])
+    highest_memory = max(rows, key=lambda row: row["mem_pct"])
+
+    grouped = {}
+
+    for row in rows:
+        name = row["name"]
+
+        if name not in grouped:
+            grouped[name] = {
+                "name": name,
+                "samples": 0,
+                "cpu_total": 0.0,
+            }
+
+        grouped[name]["samples"] += 1
+        grouped[name]["cpu_total"] += row["cpu_pct"]
+
+    for process in grouped.values():
+        process["average_cpu"] = (
+            process["cpu_total"] / process["samples"]
+        )
+
+    top_average_cpu = sorted(
+        grouped.values(),
+        key=lambda process: process["average_cpu"],
+        reverse=True,
+    )[:5]
+
+    return {
+        "highest_cpu": highest_cpu,
+        "highest_memory": highest_memory,
+        "top_average_cpu": top_average_cpu,
+    }
+
+
+def print_system_stats(stats):
     duration = stats["duration_seconds"]
 
     print("System Statistics")
@@ -284,6 +311,59 @@ def print_system_stats(stats):
     )
 
 
+def print_process_stats(stats):
+    """Print Stage 3 process statistics."""
+
+    print()
+    print("Process Statistics")
+    print("===================")
+
+    highest_cpu = stats["highest_cpu"]
+    highest_memory = stats["highest_memory"]
+
+    if highest_cpu is not None:
+        print(
+            "Highest CPU: {} (PID {}, {:.1f}%)".format(
+                highest_cpu["name"],
+                highest_cpu["pid"],
+                highest_cpu["cpu_pct"],
+            )
+        )
+    else:
+        print("Highest CPU: no process data")
+
+    if highest_memory is not None:
+        print(
+            "Highest Memory: {} (PID {}, {:.1f}%)".format(
+                highest_memory["name"],
+                highest_memory["pid"],
+                highest_memory["mem_pct"],
+            )
+        )
+    else:
+        print("Highest Memory: no process data")
+
+    print()
+    print("Top 5 Processes by Average CPU:")
+
+    if not stats["top_average_cpu"]:
+        print("  No process data")
+        return
+
+    for index, process in enumerate(
+        stats["top_average_cpu"],
+        start=1,
+    ):
+        print(
+            "  {}. {} - {:.1f}% average CPU ({} samples)".format(
+                index,
+                process["name"],
+                process["average_cpu"],
+                process["samples"],
+            )
+        )
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Generate a report from Linux system monitor CSV data."
@@ -321,6 +401,7 @@ def main():
         system_directory = os.path.dirname(
             os.path.abspath(args.system_csv)
         )
+
         process_csv = os.path.join(
             system_directory,
             "processes.csv",
@@ -359,9 +440,11 @@ def main():
         print("no valid samples", file=sys.stderr)
         return 1
 
-    stats = calculate_system_stats(system_rows)
+    system_stats = calculate_system_stats(system_rows)
+    process_stats = calculate_process_stats(process_rows)
 
-    print_system_stats(stats)
+    print_system_stats(system_stats)
+    print_process_stats(process_stats)
 
     return 0
 
