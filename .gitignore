@@ -12,3 +12,7 @@ __pycache__/
 
 # editor
 .vscode/
+
+# object and dependency files from make
+*.o
+*.d
