@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import json
 import argparse
 import csv
 import os
@@ -363,7 +363,30 @@ def print_process_stats(stats):
             )
         )
 
+def write_json_report(path, system_stats, process_stats):
+    report = {
+        "system": system_stats,
+        "processes": process_stats,
+    }
 
+    def json_serializer(value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+        raise TypeError(
+            "Object of type {} is not JSON serializable".format(
+                type(value).__name__
+            )
+        )
+
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(
+            report,
+            file,
+            indent=2,
+            default=json_serializer,
+        )
+        file.write("\n")
+        
 def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Generate a report from Linux system monitor CSV data."
@@ -445,6 +468,22 @@ def main():
 
     print_system_stats(system_stats)
     print_process_stats(process_stats)
+
+   
+
+    if args.json_file:
+        try:
+            write_json_report(
+                args.json_file,
+                system_stats,
+                process_stats,
+            )
+        except OSError as exc:
+            print(
+                "error: could not write JSON file: {}".format(exc),
+                file=sys.stderr,
+            )
+            return 1
 
     return 0
 
