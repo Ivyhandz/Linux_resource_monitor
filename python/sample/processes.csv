@@ -1,0 +1,4 @@
+timestamp,pid,name,cpu_pct,mem_pct
+2026-10-04T10:00:00,100,process_a,10.0,2.0
+2026-10-04T10:00:00,200,process_b,20.0,3.0
+2026-10-04T10:00:02,100,process_a,15.0,2.1
