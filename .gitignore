@@ -2,6 +2,13 @@
 build/
 monitor
 
+# C/C++ build artifacts
+*.o
+*.d
+
+# test binaries
+tests/test_*
+
 # generated logs (keep the folder itself)
 logs/*
 !logs/.gitkeep
