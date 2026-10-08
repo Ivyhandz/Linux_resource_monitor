@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "cpu.hpp"
+#include "disk.hpp"
 #include "memory.hpp"
 #include "process.hpp"
 
@@ -320,8 +321,9 @@ int run_log(int argc, char** argv) {
 
         const std::string ts = timestamp_now();
 
-        // TODO: replace this placeholder with disk_used_pct(...) once disk.cpp is written.
-        const double disk_pct = 0.0;
+        // Disk usage of the root filesystem; 0.0 if it cannot be read.
+        DiskInfo disk;
+        const double disk_pct = read_disk("/", disk) ? disk_used_pct(disk) : 0.0;
 
         std::fprintf(sys_csv, "%s,%.1f,%.1f,%.1f,%.1f,%.1f\n", ts.c_str(), usage.total,
                      mem_used_pct(mem), swap_used_pct(mem), disk_pct, load1);
