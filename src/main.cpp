@@ -15,6 +15,8 @@
 #include "disk.hpp"
 #include "memory.hpp"
 #include "process.hpp"
+#include "system.hpp"
+#include "ui.hpp"
 
 namespace {
 
@@ -448,9 +450,35 @@ int run_tui() {
     return 0;
 }
 
-int not_implemented(const char* what) {
-    std::fprintf(stderr, "monitor: %s is not implemented yet\n", what);
-    return 1;
+int run_snapshot() {
+    MemInfo mem;
+    CpuTimes prev, cur;
+    if (!read_meminfo(mem) || !read_cpu_times(prev)) {
+        std::fprintf(stderr, "monitor: cannot read /proc\n");
+        return 1;
+    }
+    ProcessSampler sampler;
+    sampler.sample(0, mem.total_kb);            // baseline: CPU% needs two readings
+    struct timespec gap = {0, 500 * 1000 * 1000};
+    nanosleep(&gap, nullptr);
+
+    if (!read_meminfo(mem) || !read_cpu_times(cur)) {
+        std::fprintf(stderr, "monitor: cannot read /proc\n");
+        return 1;
+    }
+    unsigned long long now = total_jiffies(cur);
+    unsigned long long before = total_jiffies(prev);
+    unsigned long long delta = now >= before ? now - before : 0;
+
+    SystemView view;
+    view.cpu = compute_usage(prev, cur);
+    view.mem = mem;
+    if (!read_disk("/", view.disk)) view.disk = DiskInfo{};
+    read_loadavg(view.load1, view.load5, view.load15);
+    read_uptime(view.uptime_seconds);
+
+    print_snapshot(view, sampler.sample(delta, mem.total_kb));
+    return 0;
 }
 
 }  // namespace
@@ -462,7 +490,7 @@ int main(int argc, char** argv) {
     if (std::strcmp(option, "--help") == 0) { print_usage(stdout); return 0; }
     if (std::strcmp(option, "--kill") == 0) return run_kill(argc, argv);
     if (std::strcmp(option, "--log") == 0) return run_log(argc, argv);
-    if (std::strcmp(option, "--snapshot") == 0) return not_implemented("--snapshot");
+    if (std::strcmp(option, "--snapshot") == 0) return run_snapshot();
 
     print_usage(stderr);
     return 2;
