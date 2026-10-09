@@ -212,23 +212,6 @@ std::string ask(TerminalGuard& terminal, const char* prompt) {
     return trim(answer);
 }
 
-// TEMPORARY: a plain frame so the interactive mode can be tested before ui.cpp exists.
-// It is replaced by draw_screen() from ui.hpp once Teammate 3 has written it.
-void draw_temp_frame(const std::vector<ProcInfo>& procs, double cpu, double mem,
-                     const std::string& status) {
-    std::printf("\033[H");                                   // cursor to the top left
-    std::printf("Linux System Monitor (temporary view)\033[K\n");
-    std::printf("CPU %.1f%%   Memory %.1f%%\033[K\n\033[K\n", cpu, mem);
-    std::printf("%6s %7s %6s %-2s %s\033[K\n", "PID", "CPU%", "MEM%", "S", "COMMAND");
-    for (size_t i = 0; i < procs.size() && i < 15; ++i) {
-        const ProcInfo& p = procs[i];
-        std::printf("%6d %7.1f %6.1f %-2c %.50s\033[K\n", p.pid, p.cpu_pct, p.mem_pct,
-                    p.state, p.cmdline.c_str());
-    }
-    std::printf("\033[K\n[r] Refresh  [s] Search  [k] Kill  [q] Quit\033[K\n%s\033[K\n\033[J",
-                status.c_str());
-    std::fflush(stdout);
-}
 
 // ---------- --kill ----------
 
@@ -411,15 +394,18 @@ int run_tui() {
     std::vector<ProcInfo> procs;           // the latest sample
     std::string filter;                    // the active search; empty means show everything
     std::string status = "ready";
-    double cpu_total = 0.0, mem_pct = 0.0;
+    SystemView sys;                        // the latest system readings
 
     while (!g_stop) {
         if (read_meminfo(mem) && read_cpu_times(cur)) {
             unsigned long long total_now = total_jiffies(cur);
             unsigned long long total_before = total_jiffies(prev);
             unsigned long long delta = total_now >= total_before ? total_now - total_before : 0;
-            cpu_total = compute_usage(prev, cur).total;
-            mem_pct = mem_used_pct(mem);
+            sys.cpu = compute_usage(prev, cur);
+            sys.mem = mem;
+            if (!read_disk("/", sys.disk)) sys.disk = DiskInfo{};
+            read_loadavg(sys.load1, sys.load5, sys.load15);
+            read_uptime(sys.uptime_seconds);
             procs = sampler.sample(delta, mem.total_kb);
             prev = cur;
         }
@@ -431,7 +417,7 @@ int run_tui() {
                    " match(es), press r to clear";
             if (!status.empty()) line += "  |  " + status;
         }
-        draw_temp_frame(view, cpu_total, mem_pct, line);
+        draw_screen(sys, view, line + (line.empty() ? "" : "  |  ") + "[r] Refresh  [s] Search  [k] Kill  [q] Quit");
 
         char key = read_key(2000);         // wait up to 2 s for a key, then refresh anyway
         if (key == 'q' || key == 'Q') break;
