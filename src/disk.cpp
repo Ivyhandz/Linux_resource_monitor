@@ -16,8 +16,8 @@ bool read_disk(const char* path, DiskInfo& out)
     out.available_bytes =
         (unsigned long long)info.f_bavail * info.f_frsize;
 
-    out.used_bytes =
-        out.total_bytes - out.available_bytes;
+  out.used_bytes =
+    (unsigned long long)(info.f_blocks - info.f_bfree) * info.f_frsize;
 
     return true;
 }
