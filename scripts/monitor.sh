@@ -91,8 +91,8 @@ report_monitor() {
         return 1
     fi
 
-    py "${REPORT}" "${LOG_DIR}/system.csv"
-}
+   
+python3 "${REPORT}" "${LOG_DIR}/system.csv"}
 
 clean_monitor() {
     rm -f \
