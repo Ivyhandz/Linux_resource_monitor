@@ -417,7 +417,7 @@ int run_tui() {
                    " match(es), press r to clear";
             if (!status.empty()) line += "  |  " + status;
         }
-        draw_screen(sys, view, line + (line.empty() ? "" : "  |  ") + "[r] Refresh  [s] Search  [k] Kill  [q] Quit");
+        draw_screen(sys, view, line);
 
         char key = read_key(2000);         // wait up to 2 s for a key, then refresh anyway
         if (key == 'q' || key == 'Q') break;
