@@ -177,17 +177,39 @@ private:
 // Waits up to timeout_ms for one keypress. Returns 0 on timeout or when a signal interrupts
 // the wait, and 'q' if the input is closed.
 char read_key(int timeout_ms) {
-    struct pollfd pfd;
-    pfd.fd = STDIN_FILENO;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    int ready = poll(&pfd, 1, timeout_ms);
-    if (ready <= 0) return 0;
-    char c = 0;
-    ssize_t n = read(STDIN_FILENO, &c, 1);
-    if (n == 0) return 'q';
-    if (n < 0) return 0;
-    return c;
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int remaining = timeout_ms;
+
+    while (remaining > 0) {
+        struct pollfd pfd;
+        pfd.fd = STDIN_FILENO;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int ready = poll(&pfd, 1, remaining);
+        if (ready <= 0) return 0;
+        char c = 0;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n == 0) return 'q';
+        if (n < 0) return 0;
+        if (c != '\033') return c;
+
+        // Arrow keys and touchpad scrolling arrive as escape sequences (ESC [ A ...).
+        // Discard the rest of the sequence and keep waiting for the time that is left,
+        // so these keys do not cause a refresh.
+        char junk[32];
+        pfd.revents = 0;
+        while (poll(&pfd, 1, 20) > 0 && read(STDIN_FILENO, junk, sizeof(junk)) > 0) {
+            pfd.revents = 0;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L +
+                          (now.tv_nsec - start.tv_nsec) / 1000000L;
+        remaining = timeout_ms - static_cast<int>(elapsed_ms);
+    }
+    return 0;
 }
 
 // Reads one line in normal mode (the terminal itself handles Backspace). A signal such as
